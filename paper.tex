@@ -11,7 +11,7 @@
         T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
     \begin{document}
     
-    \title{OttoDB - A resilient key-value data store\\
+    \title{OttoDB - A Transactional Key Value Store\\
     {\footnotesize \textsuperscript{*}Note: Project Proposal}
     }
     
@@ -28,24 +28,37 @@
     % Summarize your project in 100-250 words. (You do not have to provide an abstract for
     % your project proposal.)
     \begin{abstract}
-    N/A
+        OttoDB is a key value database with transactional support. This paper explains the motivations, architecture, and design decisions made while creating OttoDB. OttoDB is heavily influenced by optimistic concurrency control strategies and adopts a similar protocol as Redis \cite{b1}. It’s goal is to compare its transactional capabilities and general speed to that of Redis, which is arguably the most used and performant key-value store in production.
     \end{abstract}
     
     % \begin{IEEEkeywords}
     % component, formatting, style, styling, insert
     % \end{IEEEkeywords}
-    
 
     % The introduction should describe your project idea. You should
     % clearly state the question you are investigating. Provide an explanation about why you think this is
     % an interesting question and why others might be interested in your (anticipated) results, i.e., provide
     % some motivation for your work.
     \section{Introduction and Motivation}
-    Many modern applications utilize key-value databases to store data. Whether for quick cache storage or a simple mapping of values. Many key-value stores have come up as contending solutions in this space: Redis \cite{b1}, CouchBase \cite{b3}, HBase \cite{b4}, Boltdb \cite{b5}, and many others \cite{b6, b7, b8}. These applications vary in performance and storage/operational guarantees (persistent storage, transactional guarantees). OttoDB was created to help learn about data storage architectures, concurrency control strategies, persistence, and what goes into providing transactional guarantees. 
+    Many web applications utilize databases for storing and retrieving data. As the need for different storage types has increased, multiple types of databases have been created: relational, document, key value stores, and many others. This paper will focus on creating a key value database, OttoDB.
+    
+    Key value stores usage can range from a form of quick cache storage to a simple mapping of values. Many key-value stores have come up as contending solutions in this space: Redis \cite{b1}, CouchBase \cite{b3}, HBase \cite{b4}, Boltdb \cite{b5}, and many others \cite{b6, b7, b8}. These key-value stores vary in performance, deployment, and storage/operational guarantees (e.g. persistent storage, transaction support). One of the most popular key value stores is the open-source project Redis \cite{b1}. It’s become one of the most performant and popular solutions \cite{b27}. While Redis allows for multi object transactions, they aren’t atomic, so they won’t fully abort if one operation in the grouping errors \cite{b28} OttoDB attempts to solve this problem, by supporting transaction and all ACID database properties. 
+    
+    In many applications, database operations (e.g. writes, reads) tend to be the bottleneck of an application. Due to this, almost every data storage service allows for concurrent processing of requests. By opening up a computer’s resources to multiple threads, more resources can be utilized. Many problems can be made faster by switching to a multithreaded design. The main point of multi-threaded applications is to maximize speed, but that speed comes at a cost. There are many problems that can occur when operations are run concurrently. Concurrent operations can create data races, where two threads are either writing simultaneously, or reading a value that another thread is in the middle of writing. Concurrency control mechanisms are needed to prevent data races from occurring. This is especially crucial in databases, where the goal is to provide stable storage. With the thought of speed in mind, OttoDB utilizes optimistic concurrency control techniques to improve performance under low levels of contention. 
+    
+    Writing applications against multi-threaded data storage systems can be difficult. In order to ease those difficulties, many databases offer an abstraction called a transaction. A transaction in a database is an operation or series of operations. Transactions are usually atomic, so their mutations only persistent all together or not at all. They are isolated from the rest of the database, so concurrent transactions don’t conflict with each other. OttoDB provides safe transactions through a serializable snapshot level of isolation, and write-ahead persistent log.
+    
+    In this paper, I describe the architecture and implementation of OttoDB. I will spend quite a lot of time explaining the optimistic concurrency control methods used to make OttoDB transactionally safe as well as performant. I tell my journey of making my first key value store, and the design decisions that were made in the process. I also compare the performance of OttoDB with Redis, utilizing it’s customizable redis benchmarking tools.
+    
+    The implementation of OttoDB is in no way revolutionary, but it does utilize techniques that are lesser-known (i.e. Multi version concurrency control, Serializable snapshot isolation). It is highly influenced by the types of systems described in Martin Kleppmann’s book, Designing Data-Intensive Applications \cite{b1}. I based OttoDB on all the optimistic concurrency control strategies explained through the book.
+    
+    My goal for making OttoDB was to first and foremost learn the ins and outs of databases, and gain a better understanding of how databases work. I was also hoping to create a key value database that utilizes optimistic concurrency control whenever possible. This area of concurrency control was fascinating to learn about, and I’m looking forward to sharing the techniques that are used to make OttoDB faster than if implemented through traditional locking techniques.
 
-    In many applications, data storage operations tend to be the bottleneck of an application. Because of this, almost every data storage service allows for concurrent processing of requests. Instead of using locks on records before reading or writing, OttoDB utilizes optimistic concurrency control through MVCC (Multi-Version Concurrency Control) to decrease the effects concurrent transactions have on response times. Instead of records holding a single value that gets changed, they hold a collection of values versioned with a timestamp.
+    \section{Overview}
 
-    Writing applications against data storage systems that handle concurrent requests can be difficult. In order to ease those difficulties, many databases offer transactions. Although transactions appear in many databases, they aren’t supported as much in the key-value store space as in traditional databases. Some key-value stores that offer transactions don’t implement rollbacks or any atomic guarantees \cite{b1}. OttoDB provides a consistent-read level of isolation and atomic commits in its transactional support.
+    %Overal Architecture Figure%
+
+    OttoDB runs as a tcp server, listening to requests to then perform operations on the underlying data storage layer. When a new transaction begins, it’s given an atomically increasing transaction id, which is used to determine record visibility. Every client is handled by a separate go routine (lightweight-thread), and interacts directly with an in-memory store of key/value records. Storing data in-memory allows for faster reads/writes on the data as compared to if it was solely stored on disk. As commands come in they are written to an append-only log, which acts as persistent storage. On startup/restart, the log is replayed on the store before any requests are handled. OttoDB’s protocol is influenced heavily by that of Redis. OttoDB supports get, set, and delete operations, along with others for transactional control.
 
     \subsection{Protocol}
 
@@ -57,10 +70,87 @@
         \item GET \textit{key} - Returns the string value of the \textit{key}, if it exists. If not, returns an empty string
         \item SET \textit{key} \textit{value} - Sets \textit{value} to \textit{key} in the database or updates previously set key, returns message ‘OK’
         \item DEL \textit{key} - Deletes a record in the database associated with the provided \textit{key}, returns message ‘OK’ on success
+        \item ABORT - Rolls back any changes made by the current transaction and ends the transaction
         \item QUIT - Kills the active TCP connection with the database
     \end{itemize}
 
     Similar to Redis \cite{b1}, all requests are terminated with an {\textbackslash}r{\textbackslash}n string. 
+
+    \subsection{Multi Version Concurrency Control (MVCC)}
+
+    Multi Version Concurrency Control (MVCC), is a technique used in OttoDB for implementing snapshot isolation. Snapshot isolation allows transactions to run as if they are viewing their own version of the database, snapshotted in time. This allows long running read-only transactions to run without interruption from many writing transactions. The main concept of MVCC is that “readers never block writers, and writers never block readers” \cite[p. 239]{b18}. 
+
+    \subsection{Serializable Snapshot Isolation (SSI)}
+
+    Although MVCC is a performant isolation level, it’s also considered a weak isolation level \cite[p. 261]{b18}. Serializable Snapshot Isolation (SSI) provides full serialization to even weak isolation levels that revolve around the idea of optimistic concurrency control \cite[p. 261]{b18}. It can perform better than true serialized execution and in loads of low contention, better than two-phase commit \cite[p. 265]{b18}. SSI is used by PostreSQL and FoundationDB \cite[p. 261]{b18}. 
+
+    \subsection{Transactional Support}
+
+    The above isolation levels make OttoDB a fully serializable database. In OttoDB transactions: (1) Are performed all together or not at all. (2) Don’t affect other transactions. The second property is handled through an MVCC and SSI implementation. 
+
+    % Storage
+    \section{Storage}
+
+    \subsection{LSM-Tree of SSTables for append-only storage}
+
+    The storage layer for OttoDB was inspired by an append-only disk writing approach taken in some databases (LevelDB \cite{b7}, RocksDB \cite{b6}, and Cassandra \cite{b19}). In this approach, data is stored in an in-memory, self-balancing tree. When in-memory storage gets too large, it’s flushed into a Sorted String Table (SSTable) \cite[p. 78]{b18}, shown in Figure X. SSTables hold key value pairs, along with a timestamp in sorted order on disk. Paired with keys in sorted order, there’s a sparse, in-memory, index map, which holds an offset to a few keys in the table \cite[p. 77]{b18}. 
+
+    %Figure X, SSTable Structure
+
+    As the in-memory store keeps getting filled up, it gets flushed to new SSTables. A background process merges tables together with a similar merging algorithm to the merge in merge-sort. Newer timestamps are chosen over older ones, so the data on disk gets compressed. By merging and compacting these appen-only structures, it creates a Log Structured Merge Tree (LSM-Tree), shown in Figure Y \cite[p. 78-79]{b18}. 
+
+    %Figure Y, LSM-Tree compaction 
+
+    This data storage approach allows for fast writes to an in-memory structure, but potentially slow read times; you might need to look many SSTables back to find a key \cite[p. 79]{b18}.
+
+    \subsection{OttoDB’s in memory storage}
+
+    Originally, OttoDB’s in-memory data was stored in a Red Black Tree, to make sure that the tree stayed balanced. Despite the benefits of an always balanced tree, adding concurrency control to the RBTree became difficult. This was because inserting one node could cause any number of tree rotations. This required the entire tree to be locked from other concurrent operations during an insert or delete. Performing a database wide lock on every transaction was not attractive, especially because my goal is to minimize time spent blocking on locks. While researching concurrent RBTree implementations, I found many papers \cite{b20, b21}. These implementations were clever, complex, and couldn’t fit in the scope of my project.
+
+    % Figure Wait-free concurrent Red Black Tree Design. Src [\cite{b20}]
+
+    At the point of implementing concurrency control on the RBTree, I had taken up half of my project development time. I decided to save writing data to SSTables for later, and stick with only an in-memory representation of data, along with a persisted log. Simplifying the storage layer, I changed the RBTree to a  binary tree. This change allowed me to still make the LSM-Tree/SSTable implementation in the future, as well as made concurrent safety much easier to implement.
+
+    % Figure X, Keys stored in tree
+
+    \subsection{OttoDB’s Write-Ahead Log}
+
+    % Figure Z, Format of log
+
+    OttoDB utilizes a write-ahead log, as a form of persistence and recovery. In OttoDB, the log is stored as a protocol buffer. Similar to xml and json, protocol buffers are used as a way to serialize data for either storage or message passing \cite{b22}. On startup, OttoDB checks to see if this log exists. If the log exists, all aborted transactions get filtered out, and only previously committed transactions get replayed on a new binary tree. This functionality provides OttoDB with increased durability, as it can handle being shut down while still keeping store state.
+
+    \section{Transaction Isolation}
+
+    Transactions provide a great guarantee to developers. Imagine a database where transactions don’t have any isolation. You could write a transaction that reads a value that later on gets aborted. You could also overwrite a value that an active transaction just set, completely losing the update of that transaction. Databases without isolation between transactions can cause utter chaos. 
+    
+    In order to make developers sane, transactions should be isolated. Just like how we need to protect in-memory data structures with locks or semaphores, transactions need to be protected through isolation. Isolation in transactions is a basic guarantee in almost all databases that help developers with deployed code sleep at night.
+
+    \subsection{Read Committed Isolation}
+
+    Read committed isolation provides the most basic of isolation functionalities. The main functionalities are: (1) A transaction can only read values that have been committed, (2) A transaction can only overwrite values that have been committed. These two guarantees prevent dirty reads, and dirty writes. \cite[p. 234]{b18}.
+
+    % Figure X, No dirty Reads Src[\cite[p. 234]{b18}] , User 2 only sees the value of 3 until after user 1 has committed.
+
+    % Figure Y, Example of a dirty write. Src [\cite[p. 236]{b18}]
+
+    Read committed isolation is the default isolation level in PostgreSQL, SQL Server 2012, and MemSQL \cite[p. 236]{b18}. This technique is simple, but has some major performance drawbacks. The main issue with read committed isolation is that transactions hold onto locks of the values the read or write until their transaction commits or aborts \cite[p. 236]{b18}. If a long write-heavy transaction is running, it can prevent smaller read-only transactions from making progress, as they will block until the write-heavy transaction’s locks are freed.
+
+    % Figure Z, Example of read skew Src[\cite[p. 237]{b18}]
+
+    Another downfall of read committed isolation is that it’s susceptible to read skew \cite[p. 237]{b18}. If a transaction were to read a value once, that value gets overwritten by a committing transaction, if the transaction reads that value again it will get a different result. Read skew can affect a database when it’s being backed up, by providing it an inconsistent view of the database \cite[p. 237]{b18}. It can also be tough for analytic queries, as they could return an inconsistent view of the data \cite[p. 237]{b18}. I wanted OttoDB to be as transactionally safe as possible, so a read committed isolation level was not a valid isolation target.
+
+    \subsection{Snapshot Isolation}
+
+    Snapshot isolation provides the same protections that read committed does, and also protects from read skew. The main idea behind snapshot isolation is that a transaction “sees all the data that was committed in the database at the start of the transaction. Even if the data is subsequently changed by another transaction, each transaction sees only the old data from that particular point in time” \cite[p. 238]{b18}. This isolation level is supported in many of the most popular databases \cite[p. 239]{b18}. 
+    
+    In order to provide this functionality to long running queries, multiple versions of each record are stored. This allows older transactions to read versions of data in their own snapshot while newer transactions can read data that has been committed before them.
+
+    \subsection{OttoDB’s Snapshot Isolation Implementation}
+
+    % ** Figure showing the unique transaction number and idea behind the snapshot (only older committed txn values are present) **
+
+    OttoDB stores multiple versions of a key through a technique called Multi Version Concurrency Control (MVCC). When a transaction is started, its first given a unique transaction-id. This transaction-id is used to determine which versions of data a transaction can view or overwrite. Transactions in MVCC can only view data from committed transactions that came before the transaction began.
+    
 
     % Related work falls in two categories. Background readings are those that are required
     % for you to understand the area and problem you are tackling.
@@ -323,6 +413,16 @@
     \bibitem{b16} I. Katsov, "Implementation of MVCC Transactions for Key-Value Stores", Highly Scalable Blog, 2018. [Online]. Available: https://highlyscalable.wordpress.com/2012/01/07/mvcc-transactions-key-value/.
     \bibitem{b17} E. Chance, "Implementing Your Own Transactions with MVCC", Elliot Chance, 2018. [Online]. Available: http://elliot.land/post/implementing-your-own-transactions-with-mvcc.
     \bibitem{b18} M. Kleppmann, Designing data-intensive applications. 2017.
+    \bibitem{b19} "Cassandra" Apache Cassandra http://cassandra.apache.org/
+    \bibitem{b20} Aravind Natarajan, Lee H. Savoie, and Neeraj Mittal. "Concurrent Wait-Free Red Black Trees"
+    \bibitem{b21} Franck van Breugel. "Concurrent Red-Black Trees", January 23, 2015
+    \bibitem{b22} "Protocol Buffers | Google Developers" Protocol Buffers. https://developers.google.com/protocol-buffers/
+    \bibitem{b23} Facebook Developers. (2015, Dec. 17). [RocksDB meetup] Spencer Kimball, CockroachDB – CockroachDB’s MVCC model 
+    \bibitem{b24} GopherCon UK. (2015, Sep. 10) Golang UK Conference 2015 - Ben Darnell - CockroachDB
+    \bibitem{b25} Dan R. K. Ports, Kevin Grittner. "Serializable Snapshot Isolation in PostgreSQL" 
+    \bibitem{b26} Gopher Academy (2017, Jul. 24) GopherCon 2017: Marty Schoch - Building a High-Performance Key/Value Store in Go
+    \bibitem{b27} "Best Key-Value Stores in 2018 | G2 Crowd" https://www.g2crowd.com/categories/key-value-stores
+    \bibitem{b28} "Transactions - Redis" Redis. https://redis.io/topics/transactions
     \end{thebibliography}
     \end{document}
     
